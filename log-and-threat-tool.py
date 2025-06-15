@@ -2,6 +2,7 @@ import win32evtlog
 import pandas as pd
 import sqlite3
 import re
+import datetime
 import matplotlib.pyplot as plt
 from sklearn.ensemble import IsolationForest
 from sklearn.cluster import DBSCAN
@@ -14,21 +15,26 @@ def get_windows_logs(server="localhost", log_type="System"):
     flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
     logs = []
 
+    # Get current time and calculate 7-day threshold
+    seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
+
     while True:
         events = win32evtlog.ReadEventLog(log_handle, flags, 0)
         if not events:
             break
 
         for event in events:
-            logs.append({
-                "TimeGenerated": event.TimeGenerated.Format(),
-                "EventID": event.EventID,
-                "EventType": event.EventType,
-                "Source": event.SourceName,
-                "Message": " ".join(event.StringInserts) if event.StringInserts else "No message available"
-            })
+            event_time = event.TimeGenerated
+            if event_time >= seven_days_ago: # Filter logs only from last 7 days
+                logs.append({
+                    "TimeGenerated": event.TimeGenerated.Format(),
+                    "EventID": event.EventID,
+                    "EventType": event.EventType,
+                    "Source": event.SourceName,
+                    "Message": " ".join(event.StringInserts) if event.StringInserts else "No message available"
+                })
     win32evtlog.CloseEventLog(log_handle)
-    return pd.DataFrame(logs)
+    return pd.DataFrame(logs) # Return filtered logs
 
 
 # Get logs
@@ -121,15 +127,18 @@ for _, event in suspicious_logs.iterrows():
 # Feature Engineering - Convert categorical values & create frequency metrics
 df_logs["EventID"] = df_logs["EventID"].astype(int) # Ensuring numerical representation
 df_logs["Message Length"] = df_logs["Message"].apply(lambda x: len(str(x)))
+df_logs["Event_Frequency"] = df_logs.groupby("EventID")["EventID"].transform("count")
+df_logs["Time_Difference"] = df_logs["TimeGenerated"].diff().dt.total_seconds()
 
 # Fit the model
-model = IsolationForest(contamination=0.01, random_state=42)
-df_logs["Anomaly Score"] = model.fit_predict(df_logs[["EventID", "Message Length"]]) # -1 indicates anamoly
+for contamination_level in [0.005, 0.01, 0.02, 0.05]:
+    model = IsolationForest(contamination=contamination_level, random_state=42)
+    df_logs["Anomaly Score"] = model.fit_predict(df_logs[["EventID", "Message Length"]]) # -1 indicates anomaly
+    print(f"Anomalies at contamination {contamination_level}:")
+    print(df_logs[df_logs["Anomaly Score"] == -1])
 
-# Display anamolies
-print(df_logs[df_logs["Anomaly Score"] == -1])
 
-# Nomalize features before clustering
+# Normalize features before clustering
 
 features = df_logs[df_logs["Anomaly Score"] != -1][["EventID", "Message Length"]] # Remove Isolation Forest anomalies
 scaled_features = StandardScaler().fit_transform(features)
